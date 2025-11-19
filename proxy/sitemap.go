@@ -33,8 +33,7 @@ func loadDatabasePages(r *http.Request) ([]URL, error) {
 	}
 	baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
 
-	// Build request payload
-	// TODO: Handle pagination
+	// 1. First request to get collection_id and view_id
 	payload := map[string]interface{}{
 		"page": map[string]interface{}{
 			"id": util.GetSitemapID(),
@@ -49,7 +48,6 @@ func loadDatabasePages(r *http.Request) ([]URL, error) {
 		return nil, fmt.Errorf("failed to marshal JSON: %v", err)
 	}
 
-	// Create request
 	req, err := http.NewRequest("POST",
 		fmt.Sprintf("%s/api/v3/loadCachedPageChunkV2", util.GetSiteDomain()),
 		bytes.NewBuffer(jsonData))
@@ -62,7 +60,6 @@ func loadDatabasePages(r *http.Request) ([]URL, error) {
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 
-	// Send request
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -75,14 +72,12 @@ func loadDatabasePages(r *http.Request) ([]URL, error) {
 		return nil, fmt.Errorf("failed to read response: %v", err)
 	}
 
-	// Parse response
 	var result map[string]interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON: %v", err)
 	}
 
-	// Get view ID from the response
-	var viewID string
+	var viewID, collectionID string
 	if recordMap, ok := result["recordMap"].(map[string]interface{}); ok {
 		if block, ok := recordMap["block"].(map[string]interface{}); ok {
 			if blockValue, ok := block[util.GetSitemapID()].(map[string]interface{}); ok {
@@ -90,28 +85,85 @@ func loadDatabasePages(r *http.Request) ([]URL, error) {
 					if viewIds, ok := value["view_ids"].([]interface{}); ok && len(viewIds) > 0 {
 						viewID = viewIds[0].(string)
 					}
+					if colID, ok := value["collection_id"].(string); ok {
+						collectionID = colID
+					}
 				}
 			}
 		}
 	}
 
+	if viewID == "" || collectionID == "" {
+		return nil, fmt.Errorf("failed to find viewID or collectionID")
+	}
+
+	// 2. Second request to queryCollection
+	queryPayload := map[string]interface{}{
+		"collection": map[string]interface{}{
+			"id": collectionID,
+		},
+		"collectionView": map[string]interface{}{
+			"id": viewID,
+		},
+		"loader": map[string]interface{}{
+			"type": "reducer",
+			"reducers": map[string]interface{}{
+				"collection_group_results": map[string]interface{}{
+					"type":  "results",
+					"limit": 50,
+				},
+			},
+			"sort":         []interface{}{},
+			"searchQuery":  "",
+			"userTimeZone": "Asia/Shanghai",
+		},
+	}
+
+	queryJsonData, err := json.Marshal(queryPayload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal query JSON: %v", err)
+	}
+
+	queryReq, err := http.NewRequest("POST",
+		fmt.Sprintf("%s/api/v3/queryCollection", util.GetSiteDomain()),
+		bytes.NewBuffer(queryJsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create query request: %v", err)
+	}
+
+	queryReq.Header.Set("Content-Type", "application/json")
+	queryReq.Header.Set("Accept", "*/*")
+	queryReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+
+	queryResp, err := client.Do(queryReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send query request: %v", err)
+	}
+	defer queryResp.Body.Close()
+
+	queryBody, err := io.ReadAll(queryResp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read query response: %v", err)
+	}
+
+	var queryResult map[string]interface{}
+	if err := json.Unmarshal(queryBody, &queryResult); err != nil {
+		return nil, fmt.Errorf("failed to parse query JSON: %v", err)
+	}
+
 	var urls []URL
-	if recordMap, ok := result["recordMap"].(map[string]interface{}); ok {
-		if collectionView, ok := recordMap["collection_view"].(map[string]interface{}); ok {
-			if view, ok := collectionView[viewID].(map[string]interface{}); ok {
-				if value, ok := view["value"].(map[string]interface{}); ok {
-					if pageSort, ok := value["page_sort"].([]interface{}); ok {
-						// ???? Skip the first ID and process the rest
-						// TODO: i := 1; i < len(pageSort); i++
-						for i := 0; i < len(pageSort); i++ {
-							if pageId, ok := pageSort[i].(string); ok {
-								urls = append(urls, URL{
-									Loc:        fmt.Sprintf("%s/%s", baseURL, strings.ReplaceAll(pageId, "-", "")),
-									LastMod:    time.Now().Format("2006-01-02"),
-									ChangeFreq: "daily",
-									Priority:   0.8,
-								})
-							}
+	if resultData, ok := queryResult["result"].(map[string]interface{}); ok {
+		if reducerResults, ok := resultData["reducerResults"].(map[string]interface{}); ok {
+			if collectionGroupResults, ok := reducerResults["collection_group_results"].(map[string]interface{}); ok {
+				if blockIds, ok := collectionGroupResults["blockIds"].([]interface{}); ok {
+					for _, id := range blockIds {
+						if pageId, ok := id.(string); ok {
+							urls = append(urls, URL{
+								Loc:        fmt.Sprintf("%s/%s", baseURL, strings.ReplaceAll(pageId, "-", "")),
+								LastMod:    time.Now().Format("2006-01-02"),
+								ChangeFreq: "daily",
+								Priority:   0.8,
+							})
 						}
 					}
 				}
