@@ -202,6 +202,11 @@ func injectScript(htmlString string) string {
 		.notion-topbar-mobile [role="button"][tabindex="0"][style*="border: 1px solid"] {
 			display: none !important;
 		}
+		/* Hide "Free Notion" button based on background color */
+		.notion-topbar [role="button"][style*="background: var(--c-bacAccPri)"],
+		.notion-topbar-mobile [role="button"][style*="background: var(--c-bacAccPri)"] {
+			display: none !important;
+		}
 	</style>
 	<script>
 		// Set the page title and description
